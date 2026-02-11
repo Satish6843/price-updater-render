@@ -73,7 +73,30 @@ app.get("/update-prices", async (req, res) => {
   res.send("Prices Updated ✅");
 
 });
+app.use(express.urlencoded({ extended: true }));
+
 
 app.listen(3000, () =>
   console.log("Server running")
 );
+app.get("/", (req, res) => {
+  res.send(`
+    <h2>Price Updater</h2>
+
+    <form action="/update-prices-manual" method="POST">
+      Gold Rate: <input name="gold" /><br/><br/>
+      Silver Rate: <input name="silver" /><br/><br/>
+
+      <button type="submit">Update Prices</button>
+    </form>
+  `);
+});
+app.post("/update-prices-manual", async (req, res) => {
+
+  const GOLD_RATE = req.body.gold;
+  const SILVER_RATE = req.body.silver;
+
+  // 👉 yaha tumhara same price update logic chalega
+
+  res.send("Prices Updated ✅");
+});
