@@ -1,24 +1,26 @@
 require("dotenv").config();
-
 const express = require("express");
 const fetch = require("node-fetch");
-const session = require("express-session");
 const nodemailer = require("nodemailer");
-const bodyParser = require("body-parser");
+const session = require("express-session");
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-
-/* ---------------- SESSION ---------------- */
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET,
+    secret: "priceupdatersecret",
     resave: false,
     saveUninitialized: true,
   })
 );
+
+/* ---------------- CONFIG ---------------- */
+
+const SHOP = process.env.SHOP;
+const TOKEN = process.env.SHOPIFY_TOKEN;
+const API_VERSION = "2023-10";
 
 /* ---------------- MAILER ---------------- */
 
@@ -33,10 +35,12 @@ const transporter = nodemailer.createTransport({
 /* ---------------- LOGIN PAGE ---------------- */
 
 app.get("/", (req, res) => {
-  if (req.session.login) return res.redirect("/panel");
+  if (req.session.loggedIn) {
+    return res.redirect("/panel");
+  }
 
   res.send(`
-    <h2>Login</h2>
+    <h2>Login with OTP</h2>
     <form method="POST" action="/send-otp">
       Email: <input name="email" required />
       <button type="submit">Send OTP</button>
@@ -47,16 +51,16 @@ app.get("/", (req, res) => {
 /* ---------------- SEND OTP ---------------- */
 
 app.post("/send-otp", async (req, res) => {
-  const email = req.body.email;
-  const otp = Math.floor(100000 + Math.random() * 900000);
+  const { email } = req.body;
 
+  const otp = Math.floor(100000 + Math.random() * 900000);
   req.session.otp = otp;
   req.session.email = email;
 
   await transporter.sendMail({
     from: process.env.EMAIL_USER,
     to: email,
-    subject: "Your Login OTP",
+    subject: "Your OTP Login Code",
     text: `Your OTP is ${otp}`,
   });
 
@@ -72,92 +76,14 @@ app.post("/send-otp", async (req, res) => {
 /* ---------------- VERIFY OTP ---------------- */
 
 app.post("/verify-otp", (req, res) => {
-  if (req.body.otp == req.session.otp) {
-    req.session.login = true;
-    res.redirect("/panel");
-  } else {
-    res.send("❌ Invalid OTP");
-  }
-});
+  const { otp } = req.body;
 
-/* ---------------- PANEL ---------------- */
-
-app.get("/panel", (req, res) => {
-  if (!req.session.login) return res.redirect("/");
-
-  res.send(`
-    <h2>Price Updater</h2>
-    <form method="POST" action="/update-prices">
-      Gold Rate: <input name="gold" required /><br/><br/>
-      Silver Rate: <input name="silver" required /><br/><br/>
-      <button type="submit">Update Prices</button>
-    </form>
-  `);
-});
-
-/* ---------------- SHOPIFY UPDATE ---------------- */
-
-app.post("/update-prices", async (req, res) => {
-  if (!req.session.login) return res.redirect("/");
-
-  const GOLD_RATE = Number(req.body.gold);
-  const SILVER_RATE = Number(req.body.silver);
-
-  const SHOP = process.env.SHOP;
-  const TOKEN = process.env.SHOPIFY_TOKEN;
-
-  /* GET PRODUCTS */
-  const products = await fetch(
-    `https://${SHOP}/admin/api/2023-10/products.json`,
-    {
-      headers: { "X-Shopify-Access-Token": TOKEN },
-    }
-  ).then((r) => r.json());
-
-  for (let product of products.products) {
-    const metafields = await fetch(
-      `https://${SHOP}/admin/api/2023-10/products/${product.id}/metafields.json`,
-      {
-        headers: { "X-Shopify-Access-Token": TOKEN },
-      }
-    ).then((r) => r.json());
-
-    let gold = 0,
-      silver = 0,
-      making = 0,
-      gst = 0;
-
-    metafields.metafields.forEach((m) => {
-      if (m.key === "gold_weight") gold = Number(m.value);
-      if (m.key === "silver_weight") silver = Number(m.value);
-      if (m.key === "making_charge") making = Number(m.value);
-      if (m.key === "gst") gst = Number(m.value);
-    });
-
-    let price =
-      gold * GOLD_RATE +
-      silver * SILVER_RATE +
-      making;
-
-    price += price * (gst / 100);
-
-    /* UPDATE VARIANT PRICE */
-    await fetch(
-      `https://${SHOP}/admin/api/2023-10/variants/${product.variants[0].id}.json`,
-      {
-        method: "PUT",
-        headers: {
-          "X-Shopify-Access-Token": TOKEN,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          variant: { id: product.variants[0].id, price: price.toFixed(2) },
-        }),
-      }
-    );
+  if (otp == req.session.otp) {
+    req.session.loggedIn = true;
+    return res.redirect("/panel");
   }
 
-  res.send("✅ Prices Updated Successfully");
+  res.send("❌ Invalid OTP");
 });
 
 /* ---------------- LOGOUT ---------------- */
@@ -167,6 +93,93 @@ app.get("/logout", (req, res) => {
   res.redirect("/");
 });
 
+/* ---------------- PANEL ---------------- */
+
+app.get("/panel", (req, res) => {
+  if (!req.session.loggedIn) return res.redirect("/");
+
+  res.send(`
+    <h2>Price Updater Panel</h2>
+
+    <form method="POST" action="/update-prices">
+      Gold Rate: <input name="gold" required /><br/><br/>
+      Silver Rate: <input name="silver" required /><br/><br/>
+      <button type="submit">Update Prices</button>
+    </form>
+
+    <br/>
+    <a href="/logout">Logout</a>
+  `);
+});
+
+/* ---------------- PRICE UPDATE ---------------- */
+
+app.post("/update-prices", async (req, res) => {
+  if (!req.session.loggedIn) return res.redirect("/");
+
+  const goldRate = parseFloat(req.body.gold);
+  const silverRate = parseFloat(req.body.silver);
+
+  const productsRes = await fetch(
+    `https://${SHOP}/admin/api/${API_VERSION}/products.json`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": TOKEN,
+      },
+    }
+  );
+
+  const products = await productsRes.json();
+
+  for (const product of products.products) {
+    const metafieldsRes = await fetch(
+      `https://${SHOP}/admin/api/${API_VERSION}/products/${product.id}/metafields.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": TOKEN,
+        },
+      }
+    );
+
+    const metafields = await metafieldsRes.json();
+
+    let goldWeight = 0;
+    let silverWeight = 0;
+    let making = 0;
+
+    metafields.metafields.forEach((m) => {
+      if (m.key === "gold_weight") goldWeight = parseFloat(m.value);
+      if (m.key === "silver_weight") silverWeight = parseFloat(m.value);
+      if (m.key === "making_charge") making = parseFloat(m.value);
+    });
+
+    const price =
+      goldWeight * goldRate +
+      silverWeight * silverRate +
+      making;
+
+    await fetch(
+      `https://${SHOP}/admin/api/${API_VERSION}/variants/${product.variants[0].id}.json`,
+      {
+        method: "PUT",
+        headers: {
+          "X-Shopify-Access-Token": TOKEN,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          variant: {
+            id: product.variants[0].id,
+            price: price.toFixed(2),
+          },
+        }),
+      }
+    );
+  }
+
+  res.send("✅ Prices Updated Successfully");
+});
+
 /* ---------------- SERVER ---------------- */
 
-app.listen(3000, () => console.log("Server running"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Server running"));
